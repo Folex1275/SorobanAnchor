@@ -126,6 +126,51 @@ risk category present in this codebase.
   Panics in contract code cause the entire transaction to abort; use
   `AnchorKitError` and propagate errors explicitly.
 
+### Anchor domain validation scope
+
+`validate_anchor_domain` (and `validate_anchor_domain_with_policy`) is a
+**syntax check on a string**. It performs no network I/O and gives no
+guarantee about where a later connection will go.
+
+What it checks:
+
+- The input is non-blank, has no surrounding whitespace, and is 12–2048 bytes.
+- The scheme is exactly `https://` (lower-case).
+- Every character is ASCII with no spaces or control characters, and none of
+  `< > { } | \ [ ] ^` or backtick.
+- The authority has no userinfo (`@`) and at most one `:`; any port is 1–65535.
+- The path is empty or `/` (query strings and fragments are not rejected).
+- The hostname is at most 253 bytes, contains a dot, and every label is 1–63
+  ASCII alphanumerics or hyphens that start and end with an alphanumeric.
+- Hosts whose labels are all decimal digits (dotted-decimal IPv4 such as
+  `10.0.0.1`) are rejected, as are bracketed IPv6 literals. This rejection is
+  by literal form, not by address range.
+- With a `DomainPolicy`, the hostname string is matched against ordered
+  allow/deny suffix rules.
+
+What it does **not** do:
+
+- **No DNS resolution.** A hostname that resolves to a loopback, private,
+  link-local, or cloud-metadata address passes validation (for example
+  `127.0.0.1.nip.io` or `metadata.google.internal`). Hosts written in
+  non-decimal numeric forms such as `0x7f.0.0.1` also pass, even though some
+  resolvers interpret them as IP addresses.
+- **No connection-time checks.** Validation is point-in-time. DNS answers can
+  change between validation and connection, or between requests (DNS
+  rebinding). The project does not pin resolved addresses or filter IP ranges
+  when connecting.
+- **No redirect re-validation.** The HTTP client follows a bounded number of
+  redirects by default (`ConnectionPolicy::max_redirects`), but redirect
+  targets are not passed back through `validate_anchor_domain`. Use
+  `ConnectionPolicy::strict()` to disable redirects.
+- **Policy rules match hostnames, not addresses.** A deny rule does not block
+  a different hostname that resolves to the same IP.
+
+Treat a passing result as "well-formed HTTPS origin", not as SSRF protection.
+Deployments that fetch operator- or user-supplied URLs from a network with
+access to internal services need egress controls outside this library (for
+example a filtering egress proxy or network policy).
+
 ### Cryptography
 
 - Do not introduce new cryptographic primitives without a security review.
