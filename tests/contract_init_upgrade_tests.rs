@@ -12,7 +12,7 @@
 
 mod contract_init_upgrade_tests {
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
-    use soroban_sdk::{Address, Bytes, BytesN, Env, IntoVal};
+    use soroban_sdk::{Address, Bytes, BytesN, Env, Error, IntoVal};
 
     use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient};
     use anchorkit::errors::ErrorCode;
@@ -107,6 +107,25 @@ mod contract_init_upgrade_tests {
     fn initialize_twice_error_code_is_already_initialized() {
         // Verify the error code value matches the canonical discriminant.
         assert_eq!(ErrorCode::AlreadyInitialized as u32, 1);
+    }
+
+    #[test]
+    fn second_initialize_returns_already_initialized_error() {
+        let env = make_env();
+        set_ledger(&env, 1000);
+        let (client, admin) = deploy(&env);
+
+        assert!(client.try_initialize(&admin).is_ok(), "first initialization must succeed");
+
+        let err = client
+            .try_initialize(&admin)
+            .expect_err("second initialization must be rejected")
+            .expect("rejection must be a contract error, not a host failure");
+        assert_eq!(err, Error::from_contract_error(ErrorCode::AlreadyInitialized as u32));
+
+        // The rejected call leaves the original configuration in place.
+        assert!(client.is_initialized());
+        assert_eq!(client.get_admin(), admin);
     }
 
     // -----------------------------------------------------------------------
