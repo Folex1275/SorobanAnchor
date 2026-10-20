@@ -137,6 +137,50 @@ mod capacity_limits_tests {
     }
 
     #[test]
+    fn test_cache_capacity_rejection_preserves_state() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Small, explicit cache bound
+        let max_cache_entries: u32 = 2;
+        client.set_capacity_config(&CapacityConfig {
+            max_attestors: 10,
+            max_cache_entries,
+        });
+
+        // Fill the cache exactly to capacity
+        let anchor1 = Address::generate(&env);
+        let meta1 = sample_metadata(&env, &anchor1);
+        client.cache_metadata(&anchor1, &meta1, &3600u64);
+
+        let anchor2 = Address::generate(&env);
+        let meta2 = sample_metadata(&env, &anchor2);
+        client.cache_metadata(&anchor2, &meta2, &3600u64);
+
+        assert_eq!(client.get_cache_count(), max_cache_entries);
+
+        // One additional distinct insertion must be rejected
+        let anchor3 = Address::generate(&env);
+        let meta3 = sample_metadata(&env, &anchor3);
+        let result = client.try_cache_metadata(&anchor3, &meta3, &3600u64);
+        assert!(
+            result.is_err(),
+            "insertion beyond max_cache_entries must be rejected",
+        );
+
+        // Cache state remains valid: count unchanged and prior entries intact
+        assert_eq!(client.get_cache_count(), max_cache_entries);
+        assert_eq!(client.get_cached_metadata(&anchor1), Some(meta1));
+        assert_eq!(client.get_cached_metadata(&anchor2), Some(meta2));
+        assert_eq!(client.get_cached_metadata(&anchor3), None);
+    }
+
+    #[test]
     fn test_same_cache_entry_does_not_increase_count() {
         let env = make_env();
         set_ledger(&env, 0);

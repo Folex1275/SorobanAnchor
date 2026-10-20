@@ -278,6 +278,55 @@ mod cache_invalidation_hook_tests {
         assert!(!cleared, "should return false when nothing was cached");
     }
 
+    /// Regression: selective invalidation must remove only the requested key
+    /// and leave unrelated anchor metadata intact.
+    #[test]
+    fn test_invalidation_removes_only_requested_key() {
+        let env = make_env();
+        let (_admin, client) = setup(&env);
+
+        set_ledger(&env, 1000);
+        let anchor_a = Address::generate(&env);
+        let anchor_b = Address::generate(&env);
+
+        // Populate two distinct anchor metadata cache entries.
+        let meta_a = sample_metadata(&env, &anchor_a);
+        let meta_b = sample_metadata(&env, &anchor_b);
+        client.cache_metadata(&anchor_a, &meta_a, &3600u64);
+        client.cache_metadata(&anchor_b, &meta_b, &3600u64);
+
+        assert!(
+            client.get_cache_diagnostics(&anchor_a).metadata_cached,
+            "anchor A metadata should be cached before invalidation"
+        );
+        assert!(
+            client.get_cache_diagnostics(&anchor_b).metadata_cached,
+            "anchor B metadata should be cached before invalidation"
+        );
+
+        // Invalidate only anchor A through the public hook.
+        let cleared = client.invalidate_cache_for_anchor(&anchor_a);
+        assert!(cleared, "invalidation should report a cleared entry for anchor A");
+
+        // Anchor A must be a miss.
+        assert!(
+            !client.get_cache_diagnostics(&anchor_a).metadata_cached,
+            "anchor A metadata must be invalidated"
+        );
+
+        // Anchor B must remain a hit and still be retrievable.
+        assert!(
+            client.get_cache_diagnostics(&anchor_b).metadata_cached,
+            "anchor B metadata must remain cached after invalidating anchor A"
+        );
+        let preserved = client.get_cached_metadata(&anchor_b);
+        assert_eq!(
+            preserved,
+            Some(meta_b),
+            "anchor B metadata must remain retrievable after invalidating anchor A"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // governance execute_cache_invalidation → clears cache
     // -----------------------------------------------------------------------

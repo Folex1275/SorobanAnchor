@@ -275,6 +275,48 @@ mod metadata_version_history_tests {
     }
 
     // -----------------------------------------------------------------------
+    // Duplicate version recording
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn duplicate_version_recording_is_idempotent() {
+        let env = make_env();
+        set_ledger(&env, 1000);
+        let (client, _admin) = deploy(&env);
+        let anchor = Address::generate(&env);
+
+        // Record one metadata version.
+        client.set_anchor_metadata(&anchor, &9000, &300, &8500, &9900, &1_000_000);
+        let history_len_after_first = client.get_anchor_metadata_history(&anchor).len();
+        let count_after_first = client.get_anchor_meta_version_count(&anchor);
+        assert_eq!(history_len_after_first, 1);
+        assert_eq!(count_after_first, 1);
+
+        // Repeat the exact same operation with identical values.
+        // Intended behavior: each `set_anchor_metadata` call is a distinct
+        // write that increments the version counter, so a repeated identical
+        // input produces a new history entry (version 2) rather than being
+        // silently deduplicated. This assertion documents that explicit
+        // outcome and guards against unintended duplicate entries beyond it.
+        client.set_anchor_metadata(&anchor, &9000, &300, &8500, &9900, &1_000_000);
+
+        let history = client.get_anchor_metadata_history(&anchor);
+        assert_eq!(history.len(), 2);
+        assert_eq!(client.get_anchor_meta_version_count(&anchor), 2);
+
+        // Both entries carry the same field values but distinct versions.
+        let first = history.get(0).unwrap();
+        let second = history.get(1).unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(second.version, 2);
+        assert_eq!(first.reputation_score, second.reputation_score);
+        assert_eq!(first.average_settlement_time, second.average_settlement_time);
+        assert_eq!(first.liquidity_score, second.liquidity_score);
+        assert_eq!(first.uptime_percentage, second.uptime_percentage);
+        assert_eq!(first.total_volume, second.total_volume);
+    }
+
+    // -----------------------------------------------------------------------
     // Independent anchors have independent histories
     // -----------------------------------------------------------------------
 

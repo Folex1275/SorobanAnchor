@@ -963,6 +963,100 @@ Retrieve a request context.
 
 ## Routing
 
+### Corridor Matching Rules
+
+Multi-asset routing selects a quote for a request by matching the request's corridor (source and destination assets) and amount against each candidate quote, then applying the requested strategy and any policy filters. The fields below are the exact names used by the routing request (`AssetPairRequest`) and candidate quote (`CandidateQuote`) structures.
+
+**Request fields (`AssetPairRequest`):**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `base_asset` | `String` | Source asset code the caller wants to send |
+| `quote_asset` | `String` | Destination asset code the caller wants to receive |
+| `amount` | `u64` | Amount to route |
+| `strategy` | `RoutingStrategy` | Selection strategy (e.g. `LowestFee`) |
+| `min_reputation` | `u32` | Minimum reputation score a candidate anchor must have |
+
+**Quote fields (`CandidateQuote`):**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `anchor` | `Address` | Anchor that produced the quote |
+| `base_asset` | `String` | Source asset code of the quote |
+| `quote_asset` | `String` | Destination asset code of the quote |
+| `rate` | `u64` | Exchange rate (scaled) |
+| `fee_percentage` | `u32` | Fee in basis points |
+| `minimum_amount` | `u64` | Smallest amount the quote accepts |
+| `maximum_amount` | `u64` | Largest amount the quote accepts |
+| `valid_until` | `u64` | Ledger timestamp after which the quote is stale |
+| `reputation_score` | `u32` | Anchor reputation score |
+| `average_settlement_time` | `u64` | Average settlement time reported for the anchor |
+
+A quote is eligible for a request only when **all** of the following hold:
+
+1. `quote.base_asset` matches `request.base_asset` and `quote.quote_asset` matches `request.quote_asset` (the corridor).
+2. `quote.minimum_amount <= request.amount <= quote.maximum_amount`.
+3. `quote.valid_until` is in the future relative to the current ledger timestamp.
+4. `quote.reputation_score >= request.min_reputation`.
+
+Asset codes are compared **case-insensitively after normalization**, so `"xlm"` and `"XLM"` refer to the same asset. The strategy (for example `LowestFee`) only orders eligible quotes; it never makes an ineligible quote eligible. These rules describe existing matching behavior only — no new routing policy is implied.
+
+#### Worked example: matching quote
+
+Request:
+
+```
+AssetPairRequest {
+    base_asset: "XLM",
+    quote_asset: "USDC",
+    amount: 100,
+    strategy: RoutingStrategy::LowestFee,
+    min_reputation: 50,
+}
+```
+
+Candidate quote that matches:
+
+```
+CandidateQuote {
+    anchor: <anchor address>,
+    base_asset: "XLM",
+    quote_asset: "USDC",
+    rate: 10_000_000,
+    fee_percentage: 25,
+    minimum_amount: 10,
+    maximum_amount: 1_000,
+    valid_until: <future ledger timestamp>,
+    reputation_score: 80,
+    average_settlement_time: 30,
+}
+```
+
+This quote is eligible: the corridor matches (`XLM` → `USDC`), `minimum_amount` (10) <= `amount` (100) <= `maximum_amount` (1_000), `valid_until` is in the future, and `reputation_score` (80) >= `min_reputation` (50).
+
+#### Worked example: corridor mismatch
+
+A second candidate quote for the same request:
+
+```
+CandidateQuote {
+    anchor: <anchor address>,
+    base_asset: "XLM",
+    quote_asset: "EUR",
+    rate: 9_500_000,
+    fee_percentage: 10,
+    minimum_amount: 10,
+    maximum_amount: 1_000,
+    valid_until: <future ledger timestamp>,
+    reputation_score: 90,
+    average_settlement_time: 20,
+}
+```
+
+This quote is **ineligible** even though its fee is lower and its reputation higher: its `quote_asset` is `EUR`, which does not match the request's `quote_asset` of `USDC`. The corridor mismatch alone disqualifies it, and `LowestFee` cannot select it.
+
+---
+
 ### `route_transaction(env: Env, options: RoutingOptions) -> Quote`
 
 Route a transaction to the best anchor based on strategy.
