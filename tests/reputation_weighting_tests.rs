@@ -338,6 +338,44 @@ mod reputation_weighting_tests {
     }
 
     #[test]
+    fn test_zero_reputation_anchor_scores_zero_and_ranks_last() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor_zero = Address::generate(&env);
+        let anchor_positive = Address::generate(&env);
+        register_anchor(&env, &client, &anchor_zero);
+        register_anchor(&env, &client, &anchor_positive);
+
+        // Zero-reputation anchor: all sub-scores are zero.
+        client.set_anchor_reputation(
+            &anchor_zero,
+            &0u64, &0u64, &0u32, &0u64, &0u64,
+        );
+        // Positive-score alternative.
+        client.set_anchor_reputation(
+            &anchor_positive,
+            &100u64, &95u64, &9000u32, &9900u64, &10000u64,
+        );
+
+        // Zero reputation must not panic or produce invalid arithmetic.
+        let zero_score = client.get_anchor_composite_reputation(&anchor_zero);
+        assert_eq!(zero_score, 0);
+
+        // Positive-score behavior is unchanged and strictly greater than zero.
+        let positive_score = client.get_anchor_composite_reputation(&anchor_positive);
+        assert!(positive_score > 0);
+        assert!(positive_score > zero_score);
+
+        // Ranking policy: positive-score anchor preferred, zero-score ranked last.
+        let ranked = client.rank_anchors_by_reputation();
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked.get(0).unwrap(), anchor_positive);
+        assert_eq!(ranked.get(1).unwrap(), anchor_zero);
+    }
+
+    #[test]
     fn test_rank_anchors_no_record_scores_zero_and_appears_last() {
         let env = make_env();
         set_ledger(&env, 1_000_000);

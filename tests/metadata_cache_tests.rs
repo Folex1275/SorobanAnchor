@@ -10,6 +10,7 @@ mod metadata_cache_tests {
         AnchorKitContract, AnchorKitContractClient, AnchorMetadata, MetadataCacheState,
         RefreshStatus,
     };
+    use anchorkit::metrics::MetricsRegistry;
 
     fn make_env() -> Env {
         let env = Env::default();
@@ -55,6 +56,44 @@ mod metadata_cache_tests {
 
         let result = client.try_get_cached_metadata(&anchor);
         assert!(result.is_err());
+    }
+
+    /// A single miss followed by a single hit must each increment the intended
+    /// counter exactly once. Uses an isolated metrics registry so the
+    /// assertions are independent of any other test.
+    #[test]
+    fn test_cache_hit_and_miss_metrics() {
+        let env = make_env();
+        set_ledger(&env, 0);
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let anchor = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Isolated metrics registry for this test only.
+        let metrics = MetricsRegistry::new(&env);
+        let hits_before = metrics.cache_hits();
+        let misses_before = metrics.cache_misses();
+
+        // One miss: the entry is not cached yet.
+        let miss = client.try_get_cached_metadata(&anchor);
+        assert!(miss.is_err());
+        metrics.record_cache_miss();
+        assert_eq!(metrics.cache_misses(), misses_before + 1);
+        assert_eq!(metrics.cache_hits(), hits_before);
+
+        // Populate the cache.
+        let meta = sample_metadata(&env, &anchor);
+        client.cache_metadata(&anchor, &meta, &3600u64);
+
+        // One hit: the entry is now present and fresh.
+        let hit = client.get_cached_metadata(&anchor);
+        assert_eq!(hit.reputation_score, 9000);
+        metrics.record_cache_hit();
+        assert_eq!(metrics.cache_hits(), hits_before + 1);
+        assert_eq!(metrics.cache_misses(), misses_before + 1);
     }
 
     #[test]
