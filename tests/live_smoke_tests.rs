@@ -417,3 +417,104 @@ fn live_smoke_environment_report() {
 
     // This test always passes — it is diagnostic only.
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1306: Live suite skips safely without the master gate
+// ---------------------------------------------------------------------------
+
+/// #1306: Live testnet checks must not run during ordinary local test commands.
+/// When SOROBAN_ANCHOR_INTEGRATION is absent, the suite must skip without
+/// requiring network credentials or making RPC calls.
+#[test]
+fn test_live_suite_skips_without_gate() {
+    // Temporarily unset the gate variable for this test's scope
+    let original_gate = env::var("SOROBAN_ANCHOR_INTEGRATION").ok();
+    env::remove_var("SOROBAN_ANCHOR_INTEGRATION");
+
+    // The live_env_ready check should return false
+    assert!(
+        !live_env_ready(),
+        "live_env_ready() must return false when SOROBAN_ANCHOR_INTEGRATION is unset"
+    );
+
+    // skip_if_not_live should return true (indicating skip)
+    assert!(
+        skip_if_not_live(),
+        "skip_if_not_live() must return true when gate is absent"
+    );
+
+    // Restore original value if it existed
+    if let Some(val) = original_gate {
+        env::set_var("SOROBAN_ANCHOR_INTEGRATION", val);
+    }
+
+    eprintln!("✅ Live test suite correctly skips when gate is unset");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1307: Live suite rejects non-testnet gate values
+// ---------------------------------------------------------------------------
+
+/// #1307: The live smoke workflow is explicitly testnet-only. A different
+/// gate value must not accidentally enable the tests against an unspecified
+/// network.
+#[test]
+fn test_live_suite_rejects_non_testnet_gate() {
+    // Save original gate value
+    let original_gate = env::var("SOROBAN_ANCHOR_INTEGRATION").ok();
+
+    // Test various non-testnet values
+    let invalid_gates = vec![
+        "mainnet",
+        "futurenet",
+        "production",
+        "local",
+        "yes",
+        "true",
+        "1",
+        "",
+    ];
+
+    for gate_value in invalid_gates {
+        env::set_var("SOROBAN_ANCHOR_INTEGRATION", gate_value);
+
+        // The live_env_ready check should return false for non-"testnet" values
+        assert!(
+            !live_env_ready(),
+            "live_env_ready() must return false when SOROBAN_ANCHOR_INTEGRATION='{}'",
+            gate_value
+        );
+
+        // skip_if_not_live should return true (indicating skip)
+        assert!(
+            skip_if_not_live(),
+            "skip_if_not_live() must return true when gate='{}' (not 'testnet')",
+            gate_value
+        );
+
+        eprintln!("✓ Correctly rejected gate value: '{}'", gate_value);
+    }
+
+    // Verify that only "testnet" enables the gate (when credentials are also set)
+    env::set_var("SOROBAN_ANCHOR_INTEGRATION", "testnet");
+    env::set_var("ANCHOR_CONTRACT_ID", "CDUMMYCONTRACT");
+    env::set_var("ANCHOR_ADMIN_SECRET", "SDUMMYSECRET");
+
+    assert!(
+        live_env_ready(),
+        "live_env_ready() must return true only when gate='testnet' and credentials are set"
+    );
+
+    // Clean up
+    env::remove_var("ANCHOR_CONTRACT_ID");
+    env::remove_var("ANCHOR_ADMIN_SECRET");
+    
+    if let Some(val) = original_gate {
+        env::set_var("SOROBAN_ANCHOR_INTEGRATION", val);
+    } else {
+        env::remove_var("SOROBAN_ANCHOR_INTEGRATION");
+    }
+
+    eprintln!("✅ Live test suite only accepts gate='testnet'");
+}
+

@@ -470,6 +470,31 @@ soroban contract invoke --id <contract-id> --network $SOROBAN_NETWORK \
 
 ---
 
+## Troubleshooting Common Issues
+
+### Understanding Readiness vs Liveness
+
+AnchorKit health monitoring distinguishes between two concepts that serve different operational purposes:
+
+**Readiness** indicates whether the service is ready to accept and process requests:
+- Gates traffic routing decisions
+- Failed readiness checks should remove the service from load balancers
+- Checks: contract initialization state, admin configuration, rate limiter state
+- Query via: `is_initialized()`, `get_contract_diagnostics()`
+
+**Liveness** indicates whether the process is running and not deadlocked:
+- Determines if the process needs to be restarted
+- Failed liveness checks should trigger process restarts, not traffic rerouting
+- Checks: basic health score, endpoint reachability, API responsiveness
+- Query via: `build_health_report()`, `build_health_snapshot()`
+
+**Key difference**: A service can be live (process running) but not ready (not initialized), or ready (initialized) but unhealthy (degraded performance). Use readiness checks for traffic management and liveness checks for process management.
+
+**In practice**:
+- K8s `readinessProbe`: Query `is_initialized()` — only route traffic when `true`
+- K8s `livenessProbe`: Query health endpoint — restart if unresponsive
+- Monitoring dashboards: Use `build_health_report()` for composite scores and trend analysis
+
 ### Issue: Deployment Fails with "Invalid WASM"
 
 **Solution**:
