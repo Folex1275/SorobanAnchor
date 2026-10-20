@@ -140,6 +140,10 @@ N/A (not applicable to this change) in the PR review.
       default `RetryConfig` is not overridden to allow unlimited retries.
 - [ ] Webhook URLs are validated with `validate_anchor_domain` before a
       subscription is accepted; SSRF mitigations are in place.
+- [ ] No change relies on `validate_anchor_domain` for SSRF or DNS-rebinding
+      protection: it is a syntax check only and does not resolve hosts,
+      re-validate redirect targets, or filter IP ranges at connect time. See
+      [Anchor domain validation scope](governance-and-security.md#anchor-domain-validation-scope).
 - [ ] HTTP responses are validated with `response_validator` before any field is
       used; malformed JSON does not cause a panic.
 - [ ] Content received from external anchors is treated as untrusted; field

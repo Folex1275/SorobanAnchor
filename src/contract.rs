@@ -3324,7 +3324,9 @@ impl AnchorKitContract {
     /// # Errors
     ///
     /// Panics with:
-    /// - [`ErrorCode::AttestorNotRegistered`] if attestor not registered
+    /// - [`ErrorCode::AttestorNotRegistered`] if attestor not registered,
+    ///   including when it has already been revoked (repeated revocation is
+    ///   rejected, not idempotent)
     /// - [`ErrorCode::UnauthorizedAttestor`] if caller not authorized
     ///
     /// # Side effects

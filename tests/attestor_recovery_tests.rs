@@ -5,12 +5,13 @@ mod sep10_test_util;
 mod attestor_recovery_tests {
     use soroban_sdk::{
         testutils::{Address as _, Ledger, LedgerInfo},
-        Address, Bytes, Env,
+        Address, Bytes, Env, Error,
     };
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
     use anchorkit::contract::{AnchorKitContract, AnchorKitContractClient};
+    use anchorkit::errors::ErrorCode;
     use crate::sep10_test_util::{register_attestor_with_sep10, sign_payload};
 
     fn make_env() -> Env {
@@ -211,6 +212,40 @@ mod attestor_recovery_tests {
         client.revoke_attestor(&issuer);
         // Second revocation must fail with AttestorNotRegistered.
         client.revoke_attestor(&issuer);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1254 — Repeated revocation is explicitly rejected, not idempotent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_revoke_twice_returns_attestor_not_registered() {
+        let env = make_env();
+        let (client, _, issuer, _) = setup(&env);
+
+        client.revoke_attestor(&issuer);
+        let count_after_first = client.get_attestor_count();
+        let record_after_first = client
+            .get_attestor_revocation_info(&issuer)
+            .expect("first revocation must store a revocation record");
+
+        // Operator automation that retries a revoke receives a specific
+        // AttestorNotRegistered error rather than a silent success.
+        let err = client
+            .try_revoke_attestor(&issuer)
+            .expect_err("second revocation must be rejected")
+            .expect("rejection must be a contract error, not a host failure");
+        assert_eq!(err, Error::from_contract_error(ErrorCode::AttestorNotRegistered as u32));
+
+        // The rejected call leaves the revoked state exactly as it was.
+        assert!(!client.is_attestor(&issuer));
+        assert_eq!(client.get_attestor_count(), count_after_first);
+        let record = client
+            .get_attestor_revocation_info(&issuer)
+            .expect("revocation record must survive the rejected call");
+        assert_eq!(record.revoked_at, record_after_first.revoked_at);
+        assert_eq!(record.revoked_by, record_after_first.revoked_by);
+        assert!(!record.reactivated);
     }
 
     // -----------------------------------------------------------------------

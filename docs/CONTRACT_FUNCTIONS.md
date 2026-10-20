@@ -303,10 +303,12 @@ Revoke an attestor's registration.
 **Returns:** None
 
 **Errors:**
-- `AttestorNotRegistered` (code 3) - if attestor not registered
+- `AttestorNotRegistered` (code 3) - if attestor not registered, including when it has already been revoked
 - `UnauthorizedAttestor` (code 4) - if caller not authorized
 
 **Side effects:** Removes attestor from registry
+
+Repeated revocation is not idempotent: revoking an attestor a second time fails with `AttestorNotRegistered` and leaves the existing revocation record and attestor count unchanged. Automation that retries revocations should treat this error as "already revoked".
 
 ---
 
