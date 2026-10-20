@@ -748,6 +748,118 @@ mod routing_tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // #1272: All providers unavailable
+    // Every candidate advertises a matching quote, but all are marked
+    // unavailable via the normal health API.  Routing must fail with the
+    // documented error, must not return any unavailable provider as healthy,
+    // and health filtering must not mutate the stored quote data.
+    // -----------------------------------------------------------------------
+
+    /// When every candidate anchor is marked unavailable, route_transaction
+    /// must fail rather than returning a stale/unhealthy route.
+    #[test]
+    fn test_route_all_providers_unavailable_errors() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        let anchor3 = Address::generate(&env);
+        register_anchor(&env, &client, &anchor1);
+        register_anchor(&env, &client, &anchor2);
+        register_anchor(&env, &client, &anchor3);
+
+        for anchor in [&anchor1, &anchor2, &anchor3] {
+            client.set_anchor_metadata(anchor, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+            client.submit_quote(
+                anchor,
+                &String::from_str(&env, "USD"),
+                &String::from_str(&env, "USDC"),
+                &10_000u64, &25u32, &100u64, &100_000u64, &1_003_600u64,
+            );
+        }
+
+        // Mark every candidate unavailable using the normal health API.
+        for anchor in [&anchor1, &anchor2, &anchor3] {
+            client.set_anchor_active(anchor, &false);
+        }
+
+        let options = lowest_fee_options(&env, "USD", "USDC", 5_000);
+        assert!(
+            client.try_route_transaction(&options).is_err(),
+            "routing must fail when every candidate is unavailable"
+        );
+    }
+
+    /// route_anchors must not return any unavailable provider as a healthy
+    /// candidate when all providers are unavailable.
+    #[test]
+    fn test_route_anchors_all_unavailable_returns_no_healthy_candidates() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor1 = Address::generate(&env);
+        let anchor2 = Address::generate(&env);
+        register_anchor(&env, &client, &anchor1);
+        register_anchor(&env, &client, &anchor2);
+
+        for anchor in [&anchor1, &anchor2] {
+            client.set_anchor_metadata(anchor, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+            client.submit_quote(
+                anchor,
+                &String::from_str(&env, "USD"),
+                &String::from_str(&env, "USDC"),
+                &10_000u64, &25u32, &100u64, &100_000u64, &1_003_600u64,
+            );
+            client.set_anchor_active(anchor, &false);
+        }
+
+        let results = client.route_anchors(&333u32, &333u32, &334u32, &5u32, &0u32);
+        assert_eq!(
+            results.len(),
+            0,
+            "no unavailable provider may be returned as a healthy candidate"
+        );
+    }
+
+    /// Health filtering must not mutate the stored quote data: the quote
+    /// remains readable and unchanged after its anchor is marked unavailable.
+    #[test]
+    fn test_health_filtering_does_not_mutate_quote_data() {
+        let env = make_env();
+        set_ledger(&env, 1_000_000);
+        let (client, _) = setup(&env);
+
+        let anchor = Address::generate(&env);
+        register_anchor(&env, &client, &anchor);
+        client.set_anchor_metadata(&anchor, &8000u32, &300u64, &8000u32, &9900u32, &1_000_000u64);
+        client.submit_quote(
+            &anchor,
+            &String::from_str(&env, "USD"),
+            &String::from_str(&env, "USDC"),
+            &10_000u64, &25u32, &100u64, &100_000u64, &1_003_600u64,
+        );
+
+        let before = client.get_quote(&anchor, &1u64);
+
+        client.set_anchor_active(&anchor, &false);
+
+        // Routing excludes the unavailable anchor...
+        let options = lowest_fee_options(&env, "USD", "USDC", 5_000);
+        assert!(client.try_route_transaction(&options).is_err());
+
+        // ...but the quote itself is untouched.
+        let after = client.get_quote(&anchor, &1u64);
+        assert_eq!(after.anchor, before.anchor);
+        assert_eq!(after.fee_percentage, before.fee_percentage);
+        assert_eq!(after.minimum_amount, before.minimum_amount);
+        assert_eq!(after.maximum_amount, before.maximum_amount);
+        assert_eq!(after.valid_until, before.valid_until);
+    }
+
     /// Control case: a matching USD/USDC quote remains reachable when both a
     /// mismatched EUR/GBP quote and a valid USD/USDC quote are present.
     #[test]

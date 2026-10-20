@@ -201,6 +201,42 @@ fn test_is_expired_at_ttl_boundary() {
 }
 
 // ---------------------------------------------------------------------------
+// TTL boundary semantics (fixed clock via set_ledger, no sleeps)
+// ---------------------------------------------------------------------------
+
+/// At the exact TTL boundary (age == ttl) the entry is still considered fresh
+/// by the policy: it is not expired, though it is flagged for refresh.
+#[test]
+fn test_ttl_boundary_equality_is_fresh() {
+    let env = make_env();
+    let cid = env.register_contract(None, AnchorKitContract);
+    set_ledger(&env, 1, 1000);
+
+    env.as_contract(&cid, || {
+        // age == ttl exactly.
+        let (refresh, expired) = enforce_read_policy(&env, CacheEntryType::Metadata, 3600, 3600);
+        assert!(refresh, "entry at TTL boundary should be flagged for refresh");
+        assert!(!expired, "entry at exact TTL equality must not be expired");
+    });
+}
+
+/// One second beyond the TTL (age == ttl + 1) the entry is expired and must
+/// not be served as fresh.
+#[test]
+fn test_ttl_boundary_just_beyond_is_expired() {
+    let env = make_env();
+    let cid = env.register_contract(None, AnchorKitContract);
+    set_ledger(&env, 1, 1000);
+
+    env.as_contract(&cid, || {
+        // age == ttl + 1.
+        let (refresh, expired) = enforce_read_policy(&env, CacheEntryType::Metadata, 3601, 3600);
+        assert!(refresh, "expired entry should also be flagged for refresh");
+        assert!(expired, "entry one second past TTL must be expired");
+    });
+}
+
+// ---------------------------------------------------------------------------
 // enforce_write_policy / enforce_read_policy  (require Soroban env)
 // ---------------------------------------------------------------------------
 
@@ -404,6 +440,53 @@ fn test_contract_cache_metadata_clamps_ttl_to_policy_min() {
     set_ledger(&env, 2, 1059);
     let retrieved = client.get_cached_metadata(&anchor);
     assert_eq!(retrieved.anchor, anchor, "entry should still be valid at age 59 s");
+}
+
+/// Contract-level TTL boundary: at exact TTL equality the cached entry is
+/// still returned (fresh), driven purely by the injected ledger timestamp.
+#[test]
+fn test_contract_cache_metadata_valid_at_exact_ttl() {
+    let env = make_env();
+    let cid = env.register_contract(None, AnchorKitContract);
+    set_ledger(&env, 1, 1000);
+
+    let client = AnchorKitContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let anchor = Address::generate(&env);
+    let meta = sample_metadata(&env, &anchor);
+
+    // TTL=3600 is within the default metadata band [60, 86400].
+    client.cache_metadata(&anchor, &meta, &3600u64);
+
+    // At t=4600, age == 3600 exactly — boundary equality is still fresh.
+    set_ledger(&env, 2, 4600);
+    let retrieved = client.get_cached_metadata(&anchor);
+    assert_eq!(retrieved.anchor, anchor, "entry at exact TTL equality should still be valid");
+}
+
+/// Contract-level TTL boundary: one second past TTL the entry is expired and
+/// must not be returned as fresh.
+#[test]
+fn test_contract_cache_metadata_expired_just_beyond_ttl() {
+    let env = make_env();
+    let cid = env.register_contract(None, AnchorKitContract);
+    set_ledger(&env, 1, 1000);
+
+    let client = AnchorKitContractClient::new(&env, &cid);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let anchor = Address::generate(&env);
+    let meta = sample_metadata(&env, &anchor);
+
+    client.cache_metadata(&anchor, &meta, &3600u64);
+
+    // At t=4601, age == 3601 (ttl + 1) — entry is expired.
+    set_ledger(&env, 2, 4601);
+    let result = client.try_get_cached_metadata(&anchor);
+    assert!(result.is_err(), "entry one second past TTL must not be served as fresh");
 }
 
 #[test]
