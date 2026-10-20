@@ -393,6 +393,61 @@ mod audit_log_retention_tests {
         assert_eq!(log2.log_id, 2);
     }
 
+    // ── Equal-timestamp ordering (#1259) ─────────────────────────────────────
+
+    /// Several operations can land in the same ledger and therefore share a
+    /// timestamp. Audit queries must order records by their insertion sequence
+    /// (`log_id` / `operation_index`), never by wall-clock time.
+    #[test]
+    fn test_equal_timestamp_records_are_ordered_by_sequence() {
+        let env = make_env();
+        let (admin, client) = setup(&env);
+        set_ledger(&env, 5_000);
+        let session_id = client.create_session(&admin);
+
+        // Two records in the same ledger, distinguishable by operation type.
+        let attestor = Address::generate(&env);
+        let pk = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+        client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
+        client.revoke_attestor_with_session(&admin, &session_id, &attestor);
+
+        let register = soroban_sdk::String::from_str(&env, "register");
+        let revoke = soroban_sdk::String::from_str(&env, "revoke");
+
+        let assert_sequence_order = |logs: soroban_sdk::Vec<anchorkit::contract::AuditLog>| {
+            assert_eq!(logs.len(), 2);
+            let first = logs.get(0).unwrap();
+            let second = logs.get(1).unwrap();
+            assert_eq!(first.operation.timestamp, second.operation.timestamp);
+            assert!(first.log_id < second.log_id);
+            assert_eq!(first.operation.operation_index, 0);
+            assert_eq!(second.operation.operation_index, 1);
+            assert_eq!(first.operation.operation_type, register);
+            assert_eq!(second.operation.operation_type, revoke);
+        };
+
+        assert_sequence_order(client.get_session_audit_logs(&session_id, &10));
+        assert_sequence_order(client.get_session_logs_paginated(&session_id, &0, &10));
+
+        // The global log, filtered to this session, follows the same order.
+        let mut global = soroban_sdk::Vec::new(&env);
+        for entry in client.get_audit_logs_paginated(&0, &50).iter() {
+            if entry.session_id == session_id {
+                global.push_back(entry);
+            }
+        }
+        assert_sequence_order(global);
+
+        // Repeated queries return the same order.
+        let ids = |logs: soroban_sdk::Vec<anchorkit::contract::AuditLog>| {
+            logs.iter().map(|l| l.log_id).collect::<std::vec::Vec<u64>>()
+        };
+        assert_eq!(
+            ids(client.get_session_audit_logs(&session_id, &10)),
+            ids(client.get_session_audit_logs(&session_id, &10)),
+        );
+    }
+
     #[test]
     fn test_audit_log_id_space_exhaustion_fails_closed() {
         use std::panic::{catch_unwind, AssertUnwindSafe};

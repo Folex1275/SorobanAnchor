@@ -699,3 +699,167 @@ mod session_tests {
             "session must not appear expired when expiry saturated at u64::MAX");
     }
 }
+
+/// Boundary and lifecycle regression tests for the session state machine:
+/// exact TTL expiry (#1256), the per-session operation limit (#1257), and
+/// repeated close calls (#1258).
+///
+/// All tests drive time through the Soroban test ledger only (no sleeping)
+/// and assert the stable `ErrorCode` returned by the `try_*` client methods.
+mod session_boundary_tests {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger, LedgerInfo},
+        Address, BytesN, Env, Error,
+    };
+
+    use anchorkit::contract::{
+        AnchorKitContract, AnchorKitContractClient, DEFAULT_SESSION_TTL, MAX_OPS_PER_SESSION,
+    };
+    use anchorkit::errors::ErrorCode;
+    use anchorkit::session_state_machine::SessionState;
+
+    /// Non-zero creation time so `created_at + ttl` is distinguishable from the TTL itself.
+    const CREATED_AT: u64 = 1_000;
+
+    fn set_ledger(env: &Env, timestamp: u64) {
+        env.ledger().set(LedgerInfo {
+            timestamp,
+            protocol_version: 21,
+            sequence_number: 0,
+            network_id: Default::default(),
+            base_reserve: 0,
+            min_persistent_entry_ttl: 4096,
+            min_temp_entry_ttl: 16,
+            max_entry_ttl: 6_312_000,
+        });
+    }
+
+    /// Register a contract at `CREATED_AT`, open one session for `user`, and
+    /// return `(client, admin, user, session_id)`.
+    fn setup(env: &Env) -> (AnchorKitContractClient<'_>, Address, Address, u64) {
+        env.mock_all_auths();
+        set_ledger(env, CREATED_AT);
+        let contract_id = env.register_contract(None, AnchorKitContract);
+        let client = AnchorKitContractClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        let user = Address::generate(env);
+        client.initialize(&admin);
+        let session_id = client.create_session(&user);
+        (client, admin, user, session_id)
+    }
+
+    /// The host error a contract call fails with for a given stable `ErrorCode`.
+    fn contract_error(code: ErrorCode) -> Error {
+        Error::from_contract_error(code as u32)
+    }
+
+    fn public_key(env: &Env) -> BytesN<32> {
+        BytesN::from_array(env, &[7u8; 32])
+    }
+
+    // -----------------------------------------------------------------------
+    // #1256 — expiration exact boundary
+    // -----------------------------------------------------------------------
+
+    /// Expiry policy: a session is usable while `now <= created_at + ttl` and
+    /// rejected with `SessionExpired` once `now > created_at + ttl`.
+    #[test]
+    fn test_session_usable_at_exact_expiry_and_expired_one_second_after() {
+        let env = Env::default();
+        let (client, admin, _user, session_id) = setup(&env);
+        let pk = public_key(&env);
+        let expiry = CREATED_AT + DEFAULT_SESSION_TTL;
+
+        // Before expiry: usable.
+        set_ledger(&env, expiry - 1);
+        let first = Address::generate(&env);
+        assert!(client.try_register_attestor_with_session(&admin, &session_id, &first, &pk).is_ok());
+        assert_eq!(client.get_session_state(&session_id), SessionState::Active as u32);
+
+        // Exactly at expiry: still usable.
+        set_ledger(&env, expiry);
+        let second = Address::generate(&env);
+        assert!(
+            client.try_register_attestor_with_session(&admin, &session_id, &second, &pk).is_ok(),
+            "an operation at exactly created_at + ttl must be accepted",
+        );
+        assert_eq!(client.get_session_state(&session_id), SessionState::Active as u32);
+        assert_eq!(client.get_session_operation_count(&session_id), 2);
+
+        // One second beyond expiry: rejected with SessionExpired.
+        set_ledger(&env, expiry + 1);
+        let third = Address::generate(&env);
+        let result = client.try_register_attestor_with_session(&admin, &session_id, &third, &pk);
+        assert_eq!(result.unwrap_err().unwrap(), contract_error(ErrorCode::SessionExpired));
+        assert_eq!(client.get_session_state(&session_id), SessionState::Expired as u32);
+        assert_eq!(client.get_session_operation_count(&session_id), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // #1257 — operation limit boundary
+    // -----------------------------------------------------------------------
+
+    /// The session limit is the compile-time `MAX_OPS_PER_SESSION` (no smaller
+    /// per-session limit is configurable). Operations 1..=MAX are accepted;
+    /// operation MAX + 1 fails with `SessionOperationLimitExceeded`.
+    #[test]
+    fn test_session_operation_limit_accepts_max_and_rejects_next() {
+        let env = Env::default();
+        let (client, admin, _user, session_id) = setup(&env);
+        let pk = public_key(&env);
+        let attestor = Address::generate(&env);
+
+        // Alternate register/revoke of one attestor so every call is a valid
+        // session operation without growing the attestor set.
+        for i in 0..MAX_OPS_PER_SESSION {
+            if i % 2 == 0 {
+                client.register_attestor_with_session(&admin, &session_id, &attestor, &pk);
+            } else {
+                client.revoke_attestor_with_session(&admin, &session_id, &attestor);
+            }
+        }
+        assert_eq!(client.get_session_operation_count(&session_id), MAX_OPS_PER_SESSION);
+
+        // MAX_OPS_PER_SESSION is even, so the attestor is currently revoked and
+        // the next call would otherwise be a valid registration.
+        let result = client.try_register_attestor_with_session(&admin, &session_id, &attestor, &pk);
+        assert_eq!(result.unwrap_err().unwrap(), contract_error(ErrorCode::SessionOperationLimitExceeded));
+        assert_eq!(client.get_session_operation_count(&session_id), MAX_OPS_PER_SESSION);
+        assert!(!client.is_attestor(&attestor), "rejected operation must not take effect");
+    }
+
+    // -----------------------------------------------------------------------
+    // #1258 — closing an already closed session
+    // -----------------------------------------------------------------------
+
+    /// A retried close is not idempotent: the second call fails and the
+    /// session stays closed.
+    ///
+    /// The public outcome is `IllegalTransition`, not `SessionClosed`:
+    /// `session_state_machine::validate_transition` reports `SameState` for
+    /// Closed → Closed before its terminal-state check, and `close_session`
+    /// maps `SameState` to `IllegalTransition`.
+    #[test]
+    fn test_closing_already_closed_session_returns_illegal_transition() {
+        let env = Env::default();
+        let (client, admin, user, session_id) = setup(&env);
+
+        client.close_session(&session_id, &user);
+        assert_eq!(client.get_session_state(&session_id), SessionState::Closed as u32);
+
+        let result = client.try_close_session(&session_id, &user);
+        assert_eq!(result.unwrap_err().unwrap(), contract_error(ErrorCode::IllegalTransition));
+
+        // The failed retry leaves the session closed, not active again.
+        let session = client.get_session(&session_id);
+        assert!(session.closed);
+        assert_eq!(session.state, SessionState::Closed as u32);
+        assert_eq!(client.get_session_state(&session_id), SessionState::Closed as u32);
+
+        // Operations are still rejected after the retried close.
+        let attestor = Address::generate(&env);
+        let result = client.try_register_attestor_with_session(&admin, &session_id, &attestor, &public_key(&env));
+        assert_eq!(result.unwrap_err().unwrap(), contract_error(ErrorCode::SessionClosed));
+        assert_eq!(client.get_session_operation_count(&session_id), 0);
+    }
+}
