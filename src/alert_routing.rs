@@ -430,6 +430,63 @@ mod tests {
         assert!(!router.has_route(AlertSeverity::Critical, None));
     }
 
+    // ── Fix: missing route fallback is explicit (#1289) ──────────────────────
+    //
+    // Maintainer note on fallback behavior: when an alert matches no rule,
+    // `AlertRouter::route` returns `default_routes`.  If `default_routes` is
+    // empty too, it returns an empty `Vec` — the alert is *not* silently
+    // dropped by the router, but the caller observes an empty result and
+    // `has_route` returns `false`, so it can log a warning or escalate.  No
+    // implicit destination is ever invented.
+
+    #[test]
+    fn missing_category_without_default_returns_empty_and_is_visible() {
+        // Smallest config missing one category: only Critical is routed and
+        // there is no catch-all default.
+        let router = AlertRouter::new(AlertRouterConfig {
+            rules: alloc::vec![AlertRule {
+                severity: AlertSeverity::Critical,
+                scope: None,
+                routes: alloc::vec![AlertRoute::webhook("https://hooks.example.com/critical")],
+            }],
+            default_routes: alloc::vec![],
+        });
+
+        // Info with an unknown scope has no matching rule and no fallback.
+        let routes = router.route(AlertSeverity::Info, Some("unknown-scope"));
+        assert!(
+            routes.is_empty(),
+            "missing route must surface as an empty result, not a silent drop"
+        );
+        assert!(
+            !router.has_route(AlertSeverity::Info, Some("unknown-scope")),
+            "caller must be able to detect the missing route via has_route"
+        );
+
+        // The configured category still routes deterministically.
+        let critical = router.route(AlertSeverity::Critical, None);
+        assert_eq!(critical.len(), 1);
+        assert!(critical[0].destination.contains("critical"));
+    }
+
+    #[test]
+    fn missing_category_falls_back_to_default_routes() {
+        // Same missing category, but with a configured catch-all default.
+        let router = AlertRouter::new(AlertRouterConfig {
+            rules: alloc::vec![AlertRule {
+                severity: AlertSeverity::Critical,
+                scope: None,
+                routes: alloc::vec![AlertRoute::webhook("https://hooks.example.com/critical")],
+            }],
+            default_routes: alloc::vec![AlertRoute::webhook("https://hooks.example.com/default")],
+        });
+
+        let routes = router.route(AlertSeverity::Info, Some("unknown-scope"));
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].destination, "https://hooks.example.com/default");
+        assert!(router.has_route(AlertSeverity::Info, Some("unknown-scope")));
+    }
+
     #[test]
     fn has_route_returns_true_when_default_matches() {
         let router = make_router();

@@ -365,6 +365,56 @@ mod probe_timeout_validation_tests {
             .unwrap();
         assert_eq!(cfg.latency_threshold_ms, 500);
     }
+
+    // -----------------------------------------------------------------------
+    // Missing endpoint handling (#1291)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_endpoint_is_rejected_as_misconfigured() {
+        let err = ProbeConfig::new(1, ProbeKind::Ping, "")
+            .expect_err("empty endpoint must be rejected");
+        assert!(
+            err.message.to_lowercase().contains("endpoint"),
+            "expected endpoint error, got: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn missing_endpoint_does_not_invoke_transport() {
+        use std::cell::Cell;
+
+        // A probe without an endpoint must never reach the transport layer.
+        let probe = ProbeConfig::new(1, ProbeKind::Ping, "");
+        assert!(probe.is_err(), "missing endpoint must fail validation");
+
+        let transport_calls = Cell::new(0u32);
+        // Only run the transport if a valid config could be built; since it
+        // cannot, the closure must never be invoked with an empty URL.
+        if let Ok(cfg) = probe {
+            let runner = SyntheticProbeRunner::new(vec![cfg]);
+            runner.run_all(
+                |_| {
+                    transport_calls.set(transport_calls.get() + 1);
+                    Ok(ProbeResult::success(1, 100))
+                },
+                || 0,
+            );
+        }
+        assert_eq!(
+            transport_calls.get(),
+            0,
+            "no transport call may occur for a missing endpoint",
+        );
+    }
+
+    #[test]
+    fn valid_endpoint_still_accepted() {
+        let cfg = ProbeConfig::new(1, ProbeKind::Ping, "https://anchor.example.com")
+            .expect("valid endpoint must be accepted");
+        assert_eq!(cfg.endpoint, "https://anchor.example.com");
+    }
 }
 
 // ---------------------------------------------------------------------------
