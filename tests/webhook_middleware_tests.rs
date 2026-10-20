@@ -514,6 +514,102 @@ mod webhook_middleware_tests {
         assert_eq!(entries[0].last_status_code, 0, "transport failure sets status to 0");
     }
 
+    // -----------------------------------------------------------------------
+    // Issue #1287 — a success after a failure must reset failure state
+    // -----------------------------------------------------------------------
+
+    /// A failed delivery followed by a successful delivery must leave the
+    /// observable state reporting success: the DLQ keeps only the failed
+    /// payload, the success appends nothing, and the final attempt is not
+    /// recorded as failed. The fake transport fails once then succeeds, so no
+    /// real HTTP calls occur.
+    #[test]
+    fn test_success_after_failure_resets_failure_state() {
+        let call_count = Arc::new(Mutex::new(0u32));
+        let cc = call_count.clone();
+
+        let mut dlq: BTreeMap<String, Vec<DlqEntry>> = BTreeMap::new();
+
+        // First delivery: transport fails on every attempt -> DLQ entry.
+        let failed_payload = r#"{"event":"first"}"#;
+        let first = deliver_webhook(
+            &config(1),
+            failed_payload,
+            &mut dlq,
+            move |_url, _body, _sig| {
+                *cc.lock().unwrap() += 1;
+                Err("connection refused".to_string())
+            },
+            |_| {},
+            || 1_000_000u64,
+        );
+
+        assert!(first.is_err(), "first delivery must fail");
+        assert_eq!(
+            first.unwrap_err().code,
+            ErrorCode::WebhookDeliveryFailed,
+            "failure must surface as WebhookDeliveryFailed",
+        );
+        let entries_after_failure = get_dead_letter_webhooks(&dlq, "test_dlq");
+        assert_eq!(entries_after_failure.len(), 1, "failed delivery must be recorded in DLQ");
+        assert_eq!(entries_after_failure[0].payload, failed_payload);
+        assert_eq!(entries_after_failure[0].attempts_made, 1);
+        assert_eq!(entries_after_failure[0].last_status_code, 0);
+
+        // Second delivery: transport succeeds on the first attempt.
+        let success_payload = r#"{"event":"second"}"#;
+        let second = deliver_webhook(
+            &config(1),
+            success_payload,
+            &mut dlq,
+            move |_url, _body, _sig| {
+                *cc.lock().unwrap() += 1;
+                Ok(200)
+            },
+            |_| {},
+            || 1_000_000u64,
+        );
+
+        assert!(second.is_ok(), "second delivery must succeed, got {:?}", second);
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            2,
+            "transport must be called once per delivery",
+        );
+
+        // Success must not append to the DLQ and must not overwrite the
+        // earlier failure record.
+        let entries_after_success = get_dead_letter_webhooks(&dlq, "test_dlq");
+        assert_eq!(
+            entries_after_success.len(),
+            1,
+            "successful delivery must not append to the DLQ",
+        );
+        assert_eq!(entries_after_success[0].payload, failed_payload);
+        assert!(
+            entries_after_success.iter().all(|e| e.payload != success_payload),
+            "successful payload must never appear in the DLQ",
+        );
+
+        // The final observable state for the successful payload is success:
+        // a subsequent delivery of the same payload also succeeds and still
+        // leaves the DLQ untouched, proving no stale failure state remains.
+        let third = deliver_webhook(
+            &config(1),
+            success_payload,
+            &mut dlq,
+            |_url, _body, _sig| Ok(200u16),
+            |_| {},
+            || 1_000_000u64,
+        );
+        assert!(third.is_ok(), "repeated success must remain success");
+        assert_eq!(
+            get_dead_letter_webhooks(&dlq, "test_dlq").len(),
+            1,
+            "DLQ depth must stay at the single recorded failure",
+        );
+    }
+
     /// Non-empty nonces retain their normal signature, age, and replay semantics.
     #[test]
     fn test_nonempty_nonce_normal_semantics() {

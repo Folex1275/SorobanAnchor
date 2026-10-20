@@ -50,6 +50,75 @@ fn future_dated_suppression_still_works() {
 }
 
 // ---------------------------------------------------------------------------
+// #1288 — alert deduplication window boundaries (fixed timestamps)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repeat_immediately_inside_window_is_suppressed() {
+    let d = AlertDeduplicator::new(DedupConfig {
+        window_seconds: 300,
+        max_keys: 100,
+    });
+    assert!(d.should_fire("anchor:example.com", 1_000), "first alert fires");
+    assert!(
+        !d.should_fire("anchor:example.com", 1_001),
+        "repeat one second inside the window must be suppressed"
+    );
+    assert!(
+        !d.should_fire("anchor:example.com", 1_299),
+        "repeat just before the boundary must be suppressed"
+    );
+}
+
+#[test]
+fn repeat_exactly_at_window_boundary_is_accepted() {
+    let d = AlertDeduplicator::new(DedupConfig {
+        window_seconds: 300,
+        max_keys: 100,
+    });
+    assert!(d.should_fire("anchor:example.com", 1_000));
+    assert!(
+        d.should_fire("anchor:example.com", 1_300),
+        "now - last == window_seconds is outside the window"
+    );
+}
+
+#[test]
+fn repeat_just_outside_window_is_accepted() {
+    let d = AlertDeduplicator::new(DedupConfig {
+        window_seconds: 300,
+        max_keys: 100,
+    });
+    assert!(d.should_fire("anchor:example.com", 1_000));
+    assert!(
+        d.should_fire("anchor:example.com", 1_301),
+        "repeat past the window must be accepted"
+    );
+}
+
+#[test]
+fn distinct_keys_are_deduplicated_independently() {
+    let d = AlertDeduplicator::new(DedupConfig {
+        window_seconds: 300,
+        max_keys: 100,
+    });
+    assert!(d.should_fire("anchor:a", 1_000));
+    assert!(
+        d.should_fire("anchor:b", 1_000),
+        "a different key is unaffected by another key's window"
+    );
+    assert!(!d.should_fire("anchor:a", 1_100));
+    assert!(
+        d.should_fire("anchor:b", 1_300),
+        "each key expires on its own timestamp"
+    );
+    assert!(
+        !d.should_fire("anchor:a", 1_299),
+        "key a is still inside its own window"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // #1054 — escape alert fingerprints
 // ---------------------------------------------------------------------------
 
